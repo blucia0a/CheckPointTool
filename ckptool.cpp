@@ -10,9 +10,14 @@
 #include <dlfcn.h>
 #include <sys/time.h>
 #include <assert.h>
+#include <map>
 
+
+map<unsigned long, std::pair<unsigned long, char *> > stackMap;
+ADDRINT lastMemAddr;
 
 CONTEXT currentCheckpoint;
+map<unsigned long, std::pair<unsigned long, char *> > checkpointMap;
 
 INT32 usage()
 {
@@ -22,14 +27,98 @@ INT32 usage()
     return -1;
 }
 
+
+VOID LogStackOp(){
+
+  if( stackMap.find(lastMemAddr) != stackMap.end() ){
+
+    std::pair<unsigned long, char *> existing = stackMap[ lastMemAddr ];
+    memcpy((void*)(existing.second), (void*)lastMemAddr, (existing.first));
+
+  }else{
+
+    assert(false && "Last memory access was not set up properly\n");
+
+  }
+  lastMemAddr = 0;
+
+}
+
+VOID SetupStackOp(ADDRINT memAddr, UINT32 accSize){
+
+  if( lastMemAddr != 0 ){
+    LogStackOp();
+  }
+
+  lastMemAddr = memAddr;
+  std::pair<unsigned long, char *> existing;
+  char *buf = NULL;
+  if( stackMap.find(memAddr) != stackMap.end() ){
+    /*Found the entry.  It has been written before*/
+
+    existing = stackMap[ memAddr ];
+    if( accSize == existing.first ){
+
+      /*Easy: same size as existing entry*/
+      return;
+
+    }else{
+
+      /*hard: different size from existing entry*/
+      /*need to free that, then do what we normally do*/
+      free( existing.second );
+
+    }
+
+  }
+
+  buf = (char *)calloc(1,accSize);
+  
+  existing.second = buf;
+  
+  existing.first = accSize;
+  
+  stackMap[ memAddr ] = existing;
+  
+  return;
+
+}
+
+void copyStackMapToCheckPointMap(){
+
+  map<unsigned long, std::pair<unsigned long, char *> >::iterator sMapIter, sMapEnd;
+  for(sMapIter = stackMap.begin(), sMapEnd = stackMap.end(); sMapIter != sMapEnd; sMapIter++){
+    unsigned long addr = sMapIter->first;
+    checkpointMap[ addr ] = sMapIter->second;
+  }
+
+}
+
 VOID CaptureCheckPoint(CONTEXT *ctx){
 
+  if( lastMemAddr != 0 ){
+    LogStackOp();
+  }
+
   fprintf(stderr,"Taking a checkpoint!\n");  
+  copyStackMapToCheckPointMap();
   PIN_SaveContext(ctx, &currentCheckpoint);
 
 }
 
 VOID RestoreCheckPoint(){
+
+  if( lastMemAddr != 0 ){
+    LogStackOp();
+  }
+  
+  map<unsigned long, std::pair<unsigned long, char *> >::iterator sMapIter, sMapEnd;
+  for(sMapIter = checkpointMap.begin(), sMapEnd = checkpointMap.end(); sMapIter != sMapEnd; sMapIter++){
+
+    unsigned long addr = sMapIter->first;
+    memcpy((void*)addr, (void*)(sMapIter->second.second), sMapIter->second.first);
+
+  }
 
   fprintf(stderr,"Restoring a checkpoint!\n");  
   PIN_ExecuteAt(&currentCheckpoint);
@@ -66,12 +155,29 @@ VOID instrumentImage(IMG img, VOID *v)
 
 }
 
+
 VOID instrumentTrace(TRACE trace, VOID *v)
 {
 
   for( BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl) ){
 
     for(INS ins = BBL_InsHead(bbl); INS_Valid(ins); ins = INS_Next(ins) ){
+
+      if( INS_IsStackWrite(ins) ){
+
+        INS_InsertCall(ins, IPOINT_BEFORE,(AFUNPTR)SetupStackOp, 
+                       IARG_MEMORYWRITE_EA, IARG_MEMORYWRITE_SIZE, 
+                       IARG_END);
+
+        if( INS_HasFallThrough( ins ) ){
+          /*This gets most.  Any not gotten this way, are gotten by
+            the if(lastMemAddr == 0) guard in Setup... Checkpoint... 
+            and Restore...
+          */
+          INS_InsertCall(ins, IPOINT_AFTER,(AFUNPTR)LogStackOp,IARG_END);
+        }
+
+      }
 
       if( INS_IsDirectCall(ins) && INS_IsProcedureCall(ins) ){
 
@@ -136,6 +242,8 @@ int main(int argc, char *argv[])
   if( PIN_Init(argc,argv) ) {
     return usage();
   }
+
+  stackMap.clear();
 
   //RTN_AddInstrumentFunction(instrumentRoutine,0);
   //IMG_AddInstrumentFunction(instrumentImage, 0);
