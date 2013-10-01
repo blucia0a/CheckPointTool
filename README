@@ -1,0 +1,7 @@
+check point tool.
+
+A test tool to figure out how to implement a passable version of check-pointing and rollback using pin.
+
+TODO: track all stack writes by address and add them to the checkpoint.  Recovery is two phased: 1)scan all stack writes preceding checkpoint and replay them; 2)ExecuteAt() the context of the checkpoint to get the registers.
+
+Possible future change - checkpoint all of memory?  checkpoint stack + registers + globals?  How can we track globals in Pin?
