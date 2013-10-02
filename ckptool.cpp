@@ -47,7 +47,9 @@ VOID LogStackOp(){
 VOID SetupStackOp(ADDRINT memAddr, UINT32 accSize){
 
   if( lastMemAddr != 0 ){
+
     LogStackOp();
+
   }
 
   lastMemAddr = memAddr;
@@ -88,8 +90,11 @@ void copyStackMapToCheckPointMap(){
 
   map<unsigned long, std::pair<unsigned long, char *> >::iterator sMapIter, sMapEnd;
   for(sMapIter = stackMap.begin(), sMapEnd = stackMap.end(); sMapIter != sMapEnd; sMapIter++){
+
     unsigned long addr = sMapIter->first;
+
     checkpointMap[ addr ] = sMapIter->second;
+
   }
 
 }
@@ -97,7 +102,9 @@ void copyStackMapToCheckPointMap(){
 VOID CaptureCheckPoint(CONTEXT *ctx){
 
   if( lastMemAddr != 0 ){
+
     LogStackOp();
+
   }
 
   fprintf(stderr,"Taking a checkpoint!\n");  
@@ -109,13 +116,16 @@ VOID CaptureCheckPoint(CONTEXT *ctx){
 VOID RestoreCheckPoint(){
 
   if( lastMemAddr != 0 ){
+
     LogStackOp();
+
   }
   
   map<unsigned long, std::pair<unsigned long, char *> >::iterator sMapIter, sMapEnd;
   for(sMapIter = checkpointMap.begin(), sMapEnd = checkpointMap.end(); sMapIter != sMapEnd; sMapIter++){
 
     unsigned long addr = sMapIter->first;
+
     memcpy((void*)addr, (void*)(sMapIter->second.second), sMapIter->second.first);
 
   }
