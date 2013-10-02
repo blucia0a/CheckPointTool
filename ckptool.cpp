@@ -1,5 +1,4 @@
 #include "pin.H"
-
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,154 +8,70 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <sys/time.h>
+#include <sys/resource.h>
 #include <assert.h>
 #include <map>
 
-
-map<unsigned long, std::pair<unsigned long, char *> > stackMap;
-ADDRINT lastMemAddr;
-
+/*The size of the stack to copy when taking a checkpoint*/
+unsigned long CPSTACK_SIZE;
+/*The buffer to copy to when taking a checkpoint*/
+char *cpStack;
+/*The context object that will store the register state, etc 
+  when taking a checkpoint*/
 CONTEXT currentCheckpoint;
-map<unsigned long, std::pair<unsigned long, char *> > checkpointMap;
+/*A variable that tells our checkpointing function whether
+  to capture a new checkpoint or to resume from the existing
+  one*/
+bool resumingFromCheckPoint = false;
 
 INT32 usage()
 {
-    cerr << "-=HarvSim=- An interruption-prone device simulator";
+    cerr << "-=CheckPointTool=- A tool for adding checkpoint/restart to C programs, using Pin";
     cerr << KNOB_BASE::StringKnobSummary();
     cerr << endl;
     return -1;
 }
 
 
-VOID LogStackOp(){
-
-  if( stackMap.find(lastMemAddr) != stackMap.end() ){
-
-    std::pair<unsigned long, char *> existing = stackMap[ lastMemAddr ];
-    memcpy((void*)(existing.second), (void*)lastMemAddr, (existing.first));
-
-  }else{
-
-    assert(false && "Last memory access was not set up properly\n");
-
-  }
-  lastMemAddr = 0;
-
-}
-
-VOID SetupStackOp(ADDRINT memAddr, UINT32 accSize){
-
-  if( lastMemAddr != 0 ){
-
-    LogStackOp();
-
-  }
-
-  lastMemAddr = memAddr;
-  std::pair<unsigned long, char *> existing;
-  char *buf = NULL;
-  if( stackMap.find(memAddr) != stackMap.end() ){
-    /*Found the entry.  It has been written before*/
-
-    existing = stackMap[ memAddr ];
-    if( accSize == existing.first ){
-
-      /*Easy: same size as existing entry*/
-      return;
-
-    }else{
-
-      /*hard: different size from existing entry*/
-      /*need to free that, then do what we normally do*/
-      free( existing.second );
-
-    }
-
-  }
-
-  buf = (char *)calloc(1,accSize);
-  
-  existing.second = buf;
-  
-  existing.first = accSize;
-  
-  stackMap[ memAddr ] = existing;
-  
-  return;
-
-}
-
-void copyStackMapToCheckPointMap(){
-
-  map<unsigned long, std::pair<unsigned long, char *> >::iterator sMapIter, sMapEnd;
-  for(sMapIter = stackMap.begin(), sMapEnd = stackMap.end(); sMapIter != sMapEnd; sMapIter++){
-
-    unsigned long addr = sMapIter->first;
-
-    checkpointMap[ addr ] = sMapIter->second;
-
-  }
-
-}
-
 VOID CaptureCheckPoint(CONTEXT *ctx){
 
-  if( lastMemAddr != 0 ){
+  if(resumingFromCheckPoint == true){
 
-    LogStackOp();
+    /*The way the instrumentation works out, 
+      when we resume from a checkpoint, we
+      end up passing through the instrumentation
+      that takes a checkpoint. At this point, we've
+      set all the registers back to the values
+      in the stored context.  That means we can
+      go and refill the stack from our stored copy.  
+      Of course when resuming it is not useful to
+      take another checkpoint, so we just return.
+    */
+    ADDRINT sp = PIN_GetContextReg(ctx, REG_STACK_PTR);
+    memcpy((void*)sp, (void*)cpStack, CPSTACK_SIZE);
+
+    return;
 
   }
 
-  fprintf(stderr,"Taking a checkpoint!\n");  
-  copyStackMapToCheckPointMap();
+  fprintf(stderr,"Taking a checkpoint!\n");
+  /*Get the stack pointer, copy the contents of the 
+    stack to cpStack, our checkpoint buffer*/
+  ADDRINT sp = PIN_GetContextReg(ctx, REG_STACK_PTR);
+  memcpy(cpStack, (void*)sp, CPSTACK_SIZE);
   PIN_SaveContext(ctx, &currentCheckpoint);
 
 }
 
 VOID RestoreCheckPoint(){
 
-  if( lastMemAddr != 0 ){
-
-    LogStackOp();
-
-  }
-  
-  map<unsigned long, std::pair<unsigned long, char *> >::iterator sMapIter, sMapEnd;
-  for(sMapIter = checkpointMap.begin(), sMapEnd = checkpointMap.end(); sMapIter != sMapEnd; sMapIter++){
-
-    unsigned long addr = sMapIter->first;
-
-    memcpy((void*)addr, (void*)(sMapIter->second.second), sMapIter->second.first);
-
-  }
-
-  fprintf(stderr,"Restoring a checkpoint!\n");  
+  /*ExecuteAt restores the register state.
+    resumingFromCheckPoint = true makes the 
+    checkpoint capturing code (that we will
+    jump to after ExecuteAt) restore the stack*/
+  resumingFromCheckPoint = true;
   PIN_ExecuteAt(&currentCheckpoint);
 
-}
-
-
-VOID instrumentRoutine(RTN rtn, VOID *v){
-    
-  if(strstr(RTN_Name(rtn).c_str(),"CHECKPOINT_NOW")){
-    RTN_Open(rtn);
-    RTN_InsertCall(rtn, 
-                   IPOINT_AFTER, 
-                   (AFUNPTR)CaptureCheckPoint, 
-                   IARG_CONTEXT,
-                   IARG_END);
-    RTN_Close(rtn);
-  }
-  
-  if(strstr(RTN_Name(rtn).c_str(),"RESTORE_NOW")){
-    RTN_Open(rtn);
-    RTN_InsertCall(rtn, 
-                   IPOINT_BEFORE, 
-                   (AFUNPTR)RestoreCheckPoint, 
-                   IARG_END);
-    RTN_Close(rtn);
-  }
-   
 }
 
 
@@ -172,22 +87,6 @@ VOID instrumentTrace(TRACE trace, VOID *v)
   for( BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl) ){
 
     for(INS ins = BBL_InsHead(bbl); INS_Valid(ins); ins = INS_Next(ins) ){
-
-      if( INS_IsStackWrite(ins) ){
-
-        INS_InsertCall(ins, IPOINT_BEFORE,(AFUNPTR)SetupStackOp, 
-                       IARG_MEMORYWRITE_EA, IARG_MEMORYWRITE_SIZE, 
-                       IARG_END);
-
-        if( INS_HasFallThrough( ins ) ){
-          /*This gets most.  Any not gotten this way, are gotten by
-            the if(lastMemAddr == 0) guard in Setup... Checkpoint... 
-            and Restore...
-          */
-          INS_InsertCall(ins, IPOINT_AFTER,(AFUNPTR)LogStackOp,IARG_END);
-        }
-
-      }
 
       if( INS_IsDirectCall(ins) && INS_IsProcedureCall(ins) ){
 
@@ -253,10 +152,11 @@ int main(int argc, char *argv[])
     return usage();
   }
 
-  stackMap.clear();
-
-  //RTN_AddInstrumentFunction(instrumentRoutine,0);
-  //IMG_AddInstrumentFunction(instrumentImage, 0);
+  cpStack = (char *)calloc(CPSTACK_SIZE,1);
+  //struct rlimit rv;
+  //getrlimit(RLIMIT_STACK,&rv);
+  //fprintf(stderr,"Max Stack Size = %lu\n",(unsigned long)rv.rlim_cur);
+  CPSTACK_SIZE = 4096;//(unsigned long)rv.rlim_cur - 1;
   TRACE_AddInstrumentFunction(instrumentTrace, 0);
 
   PIN_InterceptSignal(SIGTERM,termHandler,0);
