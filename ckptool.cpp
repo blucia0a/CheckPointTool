@@ -12,6 +12,7 @@
 #include <assert.h>
 #include <map>
 
+unsigned long maxStack;
 /*The size of the stack to copy when taking a checkpoint*/
 unsigned long CPSTACK_SIZE;
 /*The buffer to copy to when taking a checkpoint*/
@@ -50,6 +51,7 @@ VOID CaptureCheckPoint(CONTEXT *ctx){
     ADDRINT sp = PIN_GetContextReg(ctx, REG_STACK_PTR);
     memcpy((void*)sp, (void*)cpStack, CPSTACK_SIZE);
 
+
     return;
 
   }
@@ -58,6 +60,7 @@ VOID CaptureCheckPoint(CONTEXT *ctx){
   /*Get the stack pointer, copy the contents of the 
     stack to cpStack, our checkpoint buffer*/
   ADDRINT sp = PIN_GetContextReg(ctx, REG_STACK_PTR);
+  CPSTACK_SIZE = maxStack - sp;
   memcpy(cpStack, (void*)sp, CPSTACK_SIZE);
   PIN_SaveContext(ctx, &currentCheckpoint);
 
@@ -74,6 +77,16 @@ VOID RestoreCheckPoint(){
 
 }
 
+VOID UpdateStackSize(ADDRINT memAddr, UINT32 accSize){
+
+  if( memAddr + accSize > maxStack ){
+
+    maxStack = memAddr + accSize;
+
+  }
+
+}
+
 
 VOID instrumentImage(IMG img, VOID *v)
 {
@@ -87,6 +100,14 @@ VOID instrumentTrace(TRACE trace, VOID *v)
   for( BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl) ){
 
     for(INS ins = BBL_InsHead(bbl); INS_Valid(ins); ins = INS_Next(ins) ){
+      
+      if( INS_IsStackWrite(ins) ){
+
+        INS_InsertCall(ins, IPOINT_BEFORE,(AFUNPTR)UpdateStackSize, 
+                       IARG_MEMORYWRITE_EA, IARG_MEMORYWRITE_SIZE, 
+                       IARG_END);
+
+      }
 
       if( INS_IsDirectCall(ins) && INS_IsProcedureCall(ins) ){
 
@@ -152,11 +173,9 @@ int main(int argc, char *argv[])
     return usage();
   }
 
+  CPSTACK_SIZE = 0;
   cpStack = (char *)calloc(CPSTACK_SIZE,1);
-  //struct rlimit rv;
-  //getrlimit(RLIMIT_STACK,&rv);
-  //fprintf(stderr,"Max Stack Size = %lu\n",(unsigned long)rv.rlim_cur);
-  CPSTACK_SIZE = 4096;//(unsigned long)rv.rlim_cur - 1;
+  maxStack = 0;
   TRACE_AddInstrumentFunction(instrumentTrace, 0);
 
   PIN_InterceptSignal(SIGTERM,termHandler,0);

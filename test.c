@@ -1,12 +1,15 @@
 #include <stdlib.h>
 #include <stdio.h>
-
+#include <string.h>
 
 void CHECKPOINT_NOW(){ fprintf(stderr,"<app>:In the ckpt func\n");}//<----(4)
 void RESTORE_NOW(){ fprintf(stderr,"<app>:In the restore func\n");}
 
 void bar(int qrs,int tuv){
 
+  char a[4097];
+  memset(a,'a',4096);
+  a[4096] = 0;
   CHECKPOINT_NOW();
   fprintf(stderr,"Hi from bar! %x %x\n",qrs, tuv);//<----(5)
 
